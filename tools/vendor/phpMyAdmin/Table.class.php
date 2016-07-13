@@ -757,13 +757,15 @@ class Table
         $both = function ($field_name) use (&$field_name_R) {
             return array_search($field_name, $field_name_R);
         };
-        $diff = function ($i_L, $i_R) use (&$support_field, &$pma_conf_L, &$pma_conf_R) {
+        $diff = function ($i_L, $i_R) use (&$support_field, &$pma_conf_L, &$pma_conf_R, $color_diff) {
             foreach ($support_field as $k) {
                 if ('field_key' == $k) {
                     // 交给 diffPma_keies 处理
                 } else {
                     if ($pma_conf_L[$k][$i_L] != $pma_conf_R[$k][$i_R]) {
-                    echo $i_L.': '. $k.': '. $pma_conf_L[$k][$i_L] .': '.$pma_conf_R[$k][$i_R].': '. PHP_EOL;
+                        $color_k = "color_{$k}";
+                        $pma_conf_L[$color_k][$i_L] = $color_diff;
+                        $pma_conf_R[$color_k][$i_R] = $color_diff;
                         return TRUE;
                     }
                 }
@@ -777,12 +779,6 @@ class Table
             $i_R = $both($field_name);
             if (FALSE !== $i_R && $diff($i, $i_R)) {
                 $changeSql[] = $this->alterColumn($pma_conf_L, $i, $pma_conf_R, $i_R);
-
-                foreach ($support_field as $k) {
-                    $color_k = "color_{$k}";
-                    $pma_conf_L[$color_k][$i]   = $this->color_diff;
-                    $pma_conf_R[$color_k][$i_R] = $this->color_diff;
-                }
             }
             ++$i;
         }
@@ -977,16 +973,16 @@ class Table
                 throw new \Exception('必须要设置 $user_conf[\'table\']');
             }
 
+            if (isset($user_conf['keies']) && is_array($user_conf['keies'])) {         // keies 非必须
+                $which = 'keies';
+                $_user_conf['keies'] = $this->checkUserConf_keies($user_conf['columns'], $user_conf['keies'], $filterFn);
+            }
+
             if (isset($user_conf['columns']) && is_array($user_conf['columns'])) {     // columns 必须
                 $which = 'columns';
                 $_user_conf['columns'] = $this->checkUserConf_columns($user_conf['columns'], $filterFn);
             } else {
                 throw new \Exception('必须要设置 $user_conf[\'columns\']');
-            }
-
-            if (isset($user_conf['keies']) && is_array($user_conf['keies'])) {         // keies 非必须
-                $which = 'keies';
-                $_user_conf['keies'] = $this->checkUserConf_keies($_user_conf['columns'], $user_conf['keies'], $filterFn);
             }
         } catch (\Exception $e) {
             if ( !empty($user_conf['table']) && !empty($user_conf['table']['table']) ) {
@@ -995,7 +991,6 @@ class Table
                 $tableName = '';
             }
 
-            var_export($user_conf);
             $errMsg  = $e->getMessage();
             echo "{$tableName}: {$errMsg}", PHP_EOL;
             echo $e->getTraceAsString(), PHP_EOL, PHP_EOL;
@@ -1153,23 +1148,39 @@ EOL;
                 $_column['field_attribute'] = $filterFn($column, 'field_attribute', [FILTER_CALLBACK, ['options' => $attributeCb]], $err_str);
             }
 
-            if (empty($column['field_default_value'])) {
-                $_column['field_default_value'] = 'NONE';
-            } else {
-                $_column['field_default_value'] = $filterFn($column, 'field_default_value', [FILTER_CALLBACK, ['options' => $defaultCb]], $err_str);
+            if ( !empty($column['field_null']) ) {
+                $_column['field_null'] = $filterFn($column, 'field_null', [FILTER_CALLBACK, ['options' => $nullCb]], $err_str);
             }
 
+            if (array_key_exists('field_default_value', $column)) {
+                if (is_null($column['field_default_value'])) {
+                    $column['field_default_value'] = 'NULL';
+                }
+            } else {
+                $column['field_default_value'] = 'NONE';    // :( phpMyAdmin 中 NONE 表示用户没有选择
+            }
+            if (in_array($column['field_default_value'], ['NULL', 'NONE'])) {
+                if (empty($_column['field_null'])) {
+                    $column['field_default_value'] = 'NONE';
+                } else {
+                    $column['field_default_value'] = 'NULL';
+                }
+            }
+            $_column['field_default_value'] = $filterFn($column, 'field_default_value', [FILTER_CALLBACK, ['options' => $defaultCb]], $err_str);
+
             if ( !empty($column['field_length']) ) {
-                $_column['field_length']         = $filterFn($column, 'field_length', [FILTER_VALIDATE_INT], $err_str."，目前 field_length 要求 整数");
+                // 整形的长度只是显示长度，没有意义 http://www.cnblogs.com/lihuobao/p/5620552.html
+                if (in_array($_column['field_type'], ['TINYINT', 'SMALLINT', 'MEDIUMINT', 'INT', 'BIGINT'])) {
+                    $_column['field_length'] = '';
+                } else {
+                    $_column['field_length']         = $filterFn($column, 'field_length', [FILTER_VALIDATE_INT], $err_str."，目前 field_length 要求 整数");
+                }
             }
 
             if ( !empty($column['field_extra']) ) {
                 $_column['field_extra']         = $filterFn($column, 'field_extra', [FILTER_CALLBACK, ['options' => $extraCb]], $err_str."，目前 Extra 支持 auto_increment");
             }
 
-            if ( !empty($column['field_null']) ) {
-                $_column['field_null'] = $filterFn($column, 'field_null', [FILTER_CALLBACK, ['options' => $nullCb]], $err_str);
-            }
             // 目前不可选字段
             $_column['field_collation'] = '';
             $_column['field_key'] = "none_{$i}";   // 在 checkUserConf_keies 中重新设置
@@ -1444,12 +1455,17 @@ EOL;
             if (in_array($field_type, ['TINYINT', 'SMALLINT', 'MEDIUMINT', 'INT', 'BIGINT'])) {
                 $field_length = '';
             }
+            $field_null = 'YES'== $value['Null'] ? 'NULL' : ''; // 空：allow_null
 
             $field_default_value = $value['Default'];
-            if (empty($field_default_value)) {
-                $field_default_type = 'NONE';
-                $field_default_value = 'NONE';
-            } else if (in_array($field_default_value, ['NONE', 'NULL', 'CURRENT_TIMESTAMP'])) {
+            if (is_null($field_default_value)) {
+                if (empty($field_null)) {
+                    $field_default_value = 'NONE';  // :( phpMyAdmin 中 NONE 表示用户没有选择
+                } else {
+                    $field_default_value = 'NULL';
+                }
+            }
+            if (in_array($field_default_value, ['NONE', 'NULL', 'CURRENT_TIMESTAMP'])) {
                 $field_default_type = $field_default_value;
             } else {
                 $field_default_type = 'USER_DEFINED';
@@ -1464,7 +1480,7 @@ EOL;
                 'field_attribute'     => $field_attribute,
                 'field_extra'         => strtoupper($value['Extra']),
                 'field_comments'      => $value['Comment'],
-                'field_null'          => 'YES'== $value['Null'] ? 'NULL' : '',                 // 空：allow_null
+                'field_null'          => $field_null,
             ];
         }
 
@@ -2037,9 +2053,11 @@ EOF;
 -- 
 --   Generate @ {$time}
 -- 
---   工具目前的功能限制：
+--   工具目前的限制：
+--   功能限制：
 --   1): 不支持 TABLE RENAME
 --   2): 不支持 TABLE 修改 AUTO_INCREMENT 值
+--   配置限制：
 --   3): COLLATE 只支持 utf8_general_ci
 --   4): 存储引擎 只支持 InnoDB, MyISAM
 --   5): 索引类型 只支持 PRIMARY, UNIQUE, INDEX
@@ -2066,16 +2084,17 @@ EOF;
 
         $format = function($tableName, $user_conf) {
             $comments = [
-                'field_name'          => "\t\t\t// 名字",
-                'field_type'          => "\t\t\t// 类型 @link http://dev.mysql.com/doc/refman/5.5/en/data-types.html",
-                'field_length'        => "\t\t\t// 长度/值  是“enum”或“set”，请使用以下格式输入：'a','b','c'… 如果需要输入反斜杠(“\”)或单引号(“'”)，请在前面加上反斜杠(如 '\\xyz' 或 'a\'b')。",
-                'field_default_type'  => "\t\t\t// 默认：可选的值为 USER_DEFINED, NULL, CURRENT_TIMESTAMP",
-                'field_default_value' => "\t\t\t// 当 field_default_type 为 USER_DEFINED 时，需要填写 field_default_value，对于默认值，请只输入单个值，不要加反斜杠或引号，请用此格式：a",
-                'field_attribute'     => "\t\t\t// 属性：可选的值为",
-                'field_extra'         => "\t\t\t// 额外：目前只有一个值AUTO_INCREMENT",
-                'field_comments'      => "\t\t\t// 注释",
-                'field_null'          => "\t\t\t// 空：allow_null",
+                'field_name'          => "// 名字",
+                'field_type'          => "// 类型 @link http://dev.mysql.com/doc/refman/5.5/en/data-types.html",
+                'field_length'        => "// 长度/值  是“enum”或“set”，请使用以下格式输入：'a','b','c'… 如果需要输入反斜杠(“\”)或单引号(“'”)，请在前面加上反斜杠(如 '\\xyz' 或 'a\'b')。",
+                'field_default_type'  => "// 默认：可选的值为 USER_DEFINED, NULL, CURRENT_TIMESTAMP",
+                'field_default_value' => "// 当 field_default_type 为 USER_DEFINED 时，需要填写 field_default_value，对于默认值，请只输入单个值，不要加反斜杠或引号，请用此格式：a",
+                'field_attribute'     => "// 属性：可选的值为",
+                'field_extra'         => "// 额外：目前只有一个值AUTO_INCREMENT",
+                'field_comments'      => "// 注释",
+                'field_null'          => "// 空：allow_null",
             ];
+
             foreach ($user_conf as $key => &$value) {
                 $v = var_export($value, TRUE);
                 // 转换成 php5.6 的数组格式
@@ -2084,11 +2103,37 @@ EOF;
                 $v = preg_replace('/^(\s*)\)(,?)$/m', '\\1]\\2', $v);
                 $v = preg_replace('/=>\s*$\s*\[/m', '=> [', $v);
                 $v = preg_replace('/=> \[$\s*\]/m', '=> []', $v);
-                // 注释一些可选的字段
-                $v = preg_replace("/'field_\w+'\s*=>\s*'',?$/m", '//\\0', $v);
-                // 加上字段的注释
-                foreach ($comments as $field => $comment) {
-                    $v = preg_replace("/'{$field}'\s*=>\s*'.*',/", '\\0 '.$comment, $v, 1);
+                if ('keies' == $key) {
+                    $v = preg_replace("/'Index_comment'\s*=>\s*'',?$/m", '//\\0', $v);
+                } else if ('columns' == $key) {
+                    // 注释一些可选的字段
+                    $v = preg_replace("/'field_length'\s*=>\s*'',?$/m", '//\\0', $v);
+                    $v = preg_replace("/'field_attribute'\s*=>\s*'',?$/m", '//\\0', $v);
+                    $v = preg_replace("/'field_extra'\s*=>\s*'',?$/m", '//\\0', $v);
+                    $v = preg_replace("/'field_comments'\s*=>\s*'',?$/m", '//\\0', $v);
+                    $v = preg_replace("/'field_null'\s*=>\s*'',?$/m", '//\\0', $v);
+
+                    $max_field_len = 0;
+                    $field_lens = [];
+                    foreach ($comments as $field => $comment) {
+                        $matches = [];
+                        preg_match("/(\/\/)?'{$field}'\s*=>\s*'.*',/", $v, $matches);
+                        $field_len = 3 + strlen($matches[0]);
+                        $max_field_len = max($max_field_len, $field_len);
+                        $field_lens[$field] = $field_len;
+                    }
+                    foreach ($field_lens as &$field_len) {
+                        $field_len = $max_field_len - $field_len;
+                    }
+                    // 加上字段的注释
+                    foreach ($comments as $field => $comment) {
+                        $space = '';
+                        $space_len = $field_lens[$field];
+                        for ($i = 0; $i < $space_len; ++$i) {
+                            $space .= ' ';
+                        }
+                        $v = preg_replace("/(\/\/)?'{$field}'\s*=>\s*'.*',/", '\\0 '.$space."\t\t".$comment, $v, 1);
+                    }
                 }
                 $value = $v;
             }
